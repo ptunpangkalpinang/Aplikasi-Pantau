@@ -17,7 +17,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountBalance
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.Category
+import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.ColorLens
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteForever
@@ -76,6 +78,7 @@ fun SettingsScreen(
   onResetAllData: () -> Unit,
   onExportJson: () -> Unit,
   onImportJson: (String) -> Unit,
+  onNavigateToConnections: () -> Unit = {},
   modifier: Modifier = Modifier
 ) {
   var showInitialBalanceDialog by remember { mutableStateOf(false) }
@@ -198,6 +201,35 @@ fun SettingsScreen(
               checked = allowNegative,
               onCheckedChange = { onSetAllowNegativeBalance(it) }
             )
+          }
+
+          // Koneksi Keuangan (DANA, E-Wallet, Bank) - PRD Section 3
+          Row(
+            modifier = Modifier
+              .fillMaxWidth()
+              .clickable { onNavigateToConnections() },
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+          ) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+              Icon(Icons.Default.CloudSync, contentDescription = null, tint = PantauPrimaryBlue)
+              Spacer(modifier = Modifier.width(12.dp))
+              Column {
+                Text("Koneksi Keuangan", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                Text(
+                  text = if (uiState.connections.isNotEmpty()) {
+                    "${uiState.connections.size} akun terhubung (${uiState.connections.joinToString { it.providerName }})"
+                  } else {
+                    "Hubungkan DANA, e-wallet, dan rekening bank"
+                  },
+                  style = MaterialTheme.typography.labelSmall,
+                  color = MaterialTheme.colorScheme.onSurfaceVariant,
+                  maxLines = 1,
+                  overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                )
+              }
+            }
+            Icon(Icons.Default.ArrowForward, contentDescription = null, tint = PantauPrimaryBlue, modifier = Modifier.size(18.dp))
           }
         }
       }

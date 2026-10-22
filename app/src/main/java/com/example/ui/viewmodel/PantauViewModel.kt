@@ -5,7 +5,11 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.data.model.BudgetEntity
 import com.example.data.model.CategoryEntity
+import com.example.data.model.CategoryRuleEntity
+import com.example.data.model.FinancialConnectionEntity
+import com.example.data.model.ReviewStatus
 import com.example.data.model.SavingsGoalEntity
+import com.example.data.model.SyncLogEntity
 import com.example.data.model.TransactionEntity
 import com.example.data.model.TransactionType
 import com.example.data.repository.PantauRepository
@@ -13,6 +17,13 @@ import com.example.domain.BudgetComputation
 import com.example.domain.FinancialEngine
 import com.example.domain.FinancialSummary
 import com.example.domain.GoalComputation
+import com.example.integration.CsvStatementParser
+import com.example.integration.DuplicateCheckResult
+import com.example.integration.DuplicateTransactionChecker
+import com.example.integration.FinancialProviders
+import com.example.integration.FinancialSyncService
+import com.example.integration.SyncReport
+import com.example.integration.TransactionCategorizer
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -50,6 +61,10 @@ data class PantauUiState(
   val budgets: List<BudgetEntity> = emptyList(),
   val categories: List<CategoryEntity> = emptyList(),
   val preferences: Map<String, String> = emptyMap(),
+  val connections: List<FinancialConnectionEntity> = emptyList(),
+  val categoryRules: List<CategoryRuleEntity> = emptyList(),
+  val syncLogs: List<SyncLogEntity> = emptyList(),
+  val pendingReviewTransactions: List<TransactionEntity> = emptyList(),
   val summary: FinancialSummary = FinancialSummary(),
   val goalComputations: List<GoalComputation> = emptyList(),
   val budgetComputations: List<BudgetComputation> = emptyList(),
@@ -57,10 +72,12 @@ data class PantauUiState(
   val selectedPeriod: ReportPeriod = ReportPeriod.BULAN_INI,
   val searchQuery: String = "",
   val selectedCategoryFilter: String = "",
-  val selectedTypeFilter: String = "ALL", // ALL, INCOME, EXPENSE, SAVINGS
+  val selectedTypeFilter: String = "ALL", // ALL, INCOME, EXPENSE, SAVINGS, INTERNAL_TRANSFER
   val sortOrder: SortOrder = SortOrder.NEWEST,
   val salaryStatus: SalaryStatus = SalaryStatus.NOT_RECORDED,
   val actualSalaryThisMonth: Long = 0L,
+  val isSyncing: Boolean = false,
+  val activeSyncReport: SyncReport? = null,
   val userMessage: String? = null
 )
 
@@ -68,21 +85,44 @@ class PantauViewModel(
   private val repository: PantauRepository
 ) : ViewModel() {
 
+  private val syncService = FinancialSyncService(repository)
+
   private val _isBalanceVisible = MutableStateFlow(true)
   private val _selectedPeriod = MutableStateFlow(ReportPeriod.BULAN_INI)
   private val _searchQuery = MutableStateFlow("")
   private val _selectedCategoryFilter = MutableStateFlow("")
   private val _selectedTypeFilter = MutableStateFlow("ALL")
   private val _sortOrder = MutableStateFlow(SortOrder.NEWEST)
+  private val _isSyncing = MutableStateFlow(false)
+  private val _activeSyncReport = MutableStateFlow<SyncReport?>(null)
   private val _userMessage = MutableStateFlow<String?>(null)
 
   val uiState: StateFlow<PantauUiState> = combine(
-    repository.allTransactions,
-    repository.allGoals,
-    repository.allBudgets,
-    repository.allCategories,
-    repository.allPreferences
-  ) { txs, goals, budgets, categories, prefs ->
+    combine(
+      repository.allTransactions,
+      repository.allGoals,
+      repository.allBudgets,
+      repository.allCategories,
+      repository.allPreferences
+    ) { txs, goals, budgets, categories, prefs ->
+      Tuple5(txs, goals, budgets, categories, prefs)
+    },
+    combine(
+      repository.allConnections,
+      repository.allCategoryRules,
+      repository.recentSyncLogs,
+      repository.pendingReviewTransactions
+    ) { conns, rules, logs, pendingTxs ->
+      Tuple4(conns, rules, logs, pendingTxs)
+    },
+    combine(
+      _isSyncing,
+      _activeSyncReport,
+      _userMessage
+    ) { syncing, report, msg ->
+      Triple(syncing, report, msg)
+    }
+  ) { (txs, goals, budgets, categories, prefs), (conns, rules, logs, pendingTxs), (syncing, report, msg) ->
     val prefMap = prefs.associate { it.key to it.value }
     val initialBalance = prefMap["initial_balance"]?.toLongOrNull() ?: 0L
 
@@ -125,6 +165,10 @@ class PantauViewModel(
       budgets = budgets,
       categories = categories,
       preferences = prefMap,
+      connections = conns,
+      categoryRules = rules,
+      syncLogs = logs,
+      pendingReviewTransactions = pendingTxs,
       summary = summary,
       goalComputations = goalComps,
       budgetComputations = budgetComps,
@@ -136,7 +180,9 @@ class PantauViewModel(
       sortOrder = _sortOrder.value,
       salaryStatus = salaryStatus,
       actualSalaryThisMonth = actualSalary,
-      userMessage = _userMessage.value
+      isSyncing = syncing,
+      activeSyncReport = report,
+      userMessage = msg
     )
   }.stateIn(
     scope = viewModelScope,
@@ -172,6 +218,10 @@ class PantauViewModel(
     _userMessage.value = null
   }
 
+  fun dismissSyncReport() {
+    _activeSyncReport.value = null
+  }
+
   fun addTransaction(
     type: TransactionType,
     amount: Long,
@@ -197,7 +247,8 @@ class PantauViewModel(
         source = source.ifBlank { "Tunai" },
         note = note,
         isRecurringSalary = isRecurringSalary,
-        savingsGoalId = savingsGoalId
+        savingsGoalId = savingsGoalId,
+        reviewStatus = ReviewStatus.CONFIRMED.name
       )
       repository.insertTransaction(tx)
       _userMessage.value = "Transaksi berhasil dicatat"
@@ -378,10 +429,202 @@ class PantauViewModel(
     }
   }
 
+  // --- Financial Connection Actions ---
+  fun connectAccount(
+    providerId: String,
+    alias: String,
+    maskedAccountNumber: String,
+    method: String = "OPEN_FINANCE_SANDBOX"
+  ) {
+    viewModelScope.launch {
+      val provider = FinancialProviders.getProvider(providerId)
+      val connection = FinancialConnectionEntity(
+        id = UUID.randomUUID().toString(),
+        providerId = provider.id,
+        providerName = provider.name,
+        accountType = provider.accountType.name,
+        accountAlias = alias.ifBlank { "${provider.name} Pribadi" },
+        maskedAccountNumber = maskedAccountNumber.ifBlank { provider.defaultMaskedPlaceholder },
+        status = "CONNECTED",
+        integrationMethod = method,
+        lastSyncMillis = 0L,
+        lastSyncStatus = "Koneksi berhasil disiapkan. Siap untuk sinkronisasi.",
+        importedTransactionsCount = 0
+      )
+      repository.insertConnection(connection)
+      _userMessage.value = "Akun ${provider.name} berhasil dihubungkan"
+
+      // Trigger initial sync automatically
+      syncAccount(connection)
+    }
+  }
+
+  fun disconnectAccount(connection: FinancialConnectionEntity) {
+    viewModelScope.launch {
+      repository.deleteConnection(connection)
+      _userMessage.value = "Koneksi ke ${connection.providerName} berhasil diputuskan"
+    }
+  }
+
+  fun syncAccount(connection: FinancialConnectionEntity) {
+    viewModelScope.launch {
+      _isSyncing.value = true
+      try {
+        val rules = uiState.value.categoryRules
+        val report = syncService.syncConnection(connection, rules)
+        _activeSyncReport.value = report
+        _userMessage.value = "Sinkronisasi ${connection.providerName}: ${report.successImported} transaksi baru diimpor"
+      } catch (e: Exception) {
+        _userMessage.value = "Gagal sinkronisasi ${connection.providerName}: ${e.message}"
+      } finally {
+        _isSyncing.value = false
+      }
+    }
+  }
+
+  fun syncAllAccounts() {
+    viewModelScope.launch {
+      val conns = uiState.value.connections
+      if (conns.isEmpty()) {
+        _userMessage.value = "Belum ada akun yang terhubung"
+        return@launch
+      }
+      _isSyncing.value = true
+      var totalImported = 0
+      try {
+        val rules = uiState.value.categoryRules
+        for (conn in conns) {
+          val report = syncService.syncConnection(conn, rules)
+          totalImported += report.successImported
+        }
+        _userMessage.value = "Sinkronisasi selesai: Total $totalImported transaksi baru diimpor"
+      } catch (e: Exception) {
+        _userMessage.value = "Terjadi kesalahan saat sinkronisasi: ${e.message}"
+      } finally {
+        _isSyncing.value = false
+      }
+    }
+  }
+
+  fun importCsvStatement(
+    csvContent: String,
+    providerId: String,
+    connectionId: String? = null
+  ) {
+    viewModelScope.launch {
+      try {
+        val parsed = CsvStatementParser.parse(csvContent, providerId)
+        if (parsed.isEmpty()) {
+          _userMessage.value = "Tidak ada baris transaksi valid yang ditemukan di file CSV"
+          return@launch
+        }
+
+        val existing = repository.getAllTransactionsSnapshot()
+        val rules = uiState.value.categoryRules
+        val provider = FinancialProviders.getProvider(providerId)
+
+        val txsToInsert = mutableListOf<TransactionEntity>()
+        var imported = 0
+        var duplicates = 0
+
+        for (item in parsed) {
+          val dup = DuplicateTransactionChecker.check(
+            incomingSourceTxId = null,
+            incomingDateMillis = item.dateMillis,
+            incomingAmount = item.amount,
+            incomingNote = item.description,
+            incomingConnectionId = connectionId,
+            existingTransactions = existing
+          )
+
+          if (dup == DuplicateCheckResult.EXACT_DUPLICATE) {
+            duplicates++
+            continue
+          }
+
+          val catResult = TransactionCategorizer.categorize(
+            rawDescription = item.description,
+            merchantName = "",
+            rawType = item.rawType,
+            customRules = rules
+          )
+
+          val tx = TransactionEntity(
+            id = UUID.randomUUID().toString(),
+            type = catResult.suggestedType.name,
+            amount = item.amount,
+            category = catResult.suggestedCategory,
+            dateMillis = item.dateMillis,
+            source = item.rawSource,
+            note = item.description,
+            isRecurringSalary = catResult.isSalary,
+            savingsGoalId = null,
+            connectionId = connectionId,
+            isInternalTransfer = catResult.isInternalTransfer,
+            reviewStatus = catResult.reviewStatus.name
+          )
+          txsToInsert.add(tx)
+          imported++
+        }
+
+        if (txsToInsert.isNotEmpty()) {
+          repository.insertTransactions(txsToInsert)
+        }
+
+        _userMessage.value = "Impor CSV selesai: $imported berhasil diimpor, $duplicates duplikat dilewati."
+      } catch (e: Exception) {
+        _userMessage.value = "Gagal memproses file CSV: ${e.message}"
+      }
+    }
+  }
+
+  fun confirmPendingTransaction(
+    transactionId: String,
+    correctedCategory: String,
+    correctedType: TransactionType,
+    isInternalTransfer: Boolean,
+    linkedSavingsGoalId: String? = null,
+    saveAsRuleKeyword: String? = null
+  ) {
+    viewModelScope.launch {
+      repository.confirmPendingTransaction(
+        transactionId = transactionId,
+        correctedCategory = correctedCategory,
+        correctedType = correctedType,
+        isInternalTransfer = isInternalTransfer,
+        linkedSavingsGoalId = linkedSavingsGoalId,
+        saveAsRuleKeyword = saveAsRuleKeyword
+      )
+      _userMessage.value = "Transaksi berhasil dikonfirmasi"
+    }
+  }
+
+  fun addCategoryRule(keyword: String, targetCategory: String, type: String) {
+    if (keyword.isBlank() || targetCategory.isBlank()) return
+    viewModelScope.launch {
+      repository.insertCategoryRule(
+        CategoryRuleEntity(
+          id = UUID.randomUUID().toString(),
+          keyword = keyword.trim(),
+          targetCategory = targetCategory,
+          transactionType = type
+        )
+      )
+      _userMessage.value = "Aturan kategori '$keyword' berhasil disimpan"
+    }
+  }
+
+  fun deleteCategoryRule(rule: CategoryRuleEntity) {
+    viewModelScope.launch {
+      repository.deleteCategoryRule(rule)
+      _userMessage.value = "Aturan kategori dihapus"
+    }
+  }
+
   fun applyDemoData() {
     viewModelScope.launch {
       repository.applyDemoData()
-      _userMessage.value = "Data demo berhasil dimuat"
+      _userMessage.value = "Data demo & akun DANA/BCA berhasil dimuat"
     }
   }
 
@@ -407,7 +650,8 @@ class PantauViewModel(
       goals = state.goals,
       budgets = state.budgets,
       categories = state.categories,
-      preferences = prefs
+      preferences = prefs,
+      connections = state.connections
     )
   }
 
@@ -426,6 +670,9 @@ class PantauViewModel(
     }
   }
 }
+
+private data class Tuple4<A, B, C, D>(val a: A, val b: B, val c: C, val d: D)
+private data class Tuple5<A, B, C, D, E>(val a: A, val b: B, val c: C, val d: D, val e: E)
 
 class PantauViewModelFactory(
   private val repository: PantauRepository

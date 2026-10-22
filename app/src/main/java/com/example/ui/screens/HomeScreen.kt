@@ -68,6 +68,7 @@ fun HomeScreen(
   onNavigateToTransactions: () -> Unit,
   onNavigateToSavings: () -> Unit,
   onNavigateToBudgets: () -> Unit,
+  onNavigateToConnections: () -> Unit = {},
   onDepositGoal: (SavingsGoalEntity) -> Unit,
   onWithdrawGoal: (SavingsGoalEntity) -> Unit,
   onEditGoal: (SavingsGoalEntity) -> Unit,
@@ -118,7 +119,16 @@ fun HomeScreen(
       }
     }
 
-    // Empty state guide if brand new
+    // Financial Connections Card (PRD Section 3)
+    item {
+      FinancialConnectionsHomeCard(
+        connectionsCount = uiState.connections.size,
+        connectedProviders = uiState.connections.map { it.providerName },
+        pendingReviewCount = uiState.pendingReviewTransactions.size,
+        onClick = onNavigateToConnections
+      )
+    }
+
     if (!hasData) {
       item {
         Card(
@@ -343,3 +353,84 @@ fun SalaryStatusBanner(
 }
 
 data class Tuple4<A, B, C, D>(val a: A, val b: B, val c: C, val d: D)
+
+@Composable
+fun FinancialConnectionsHomeCard(
+  connectionsCount: Int,
+  connectedProviders: List<String>,
+  pendingReviewCount: Int,
+  onClick: () -> Unit,
+  modifier: Modifier = Modifier
+) {
+  Card(
+    shape = RoundedCornerShape(16.dp),
+    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+    modifier = modifier
+      .fillMaxWidth()
+      .clickable(onClick = onClick)
+  ) {
+    Row(
+      modifier = Modifier.padding(14.dp),
+      verticalAlignment = Alignment.CenterVertically
+    ) {
+      Box(
+        modifier = Modifier
+          .size(42.dp)
+          .background(Color(0xFFE0F2FE), CircleShape),
+        contentAlignment = Alignment.Center
+      ) {
+        Icon(
+          imageVector = Icons.Default.Savings,
+          contentDescription = null,
+          tint = PantauPrimaryBlue,
+          modifier = Modifier.size(22.dp)
+        )
+      }
+      Spacer(modifier = Modifier.width(12.dp))
+      Column(modifier = Modifier.weight(1f)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          Text(
+            text = "Koneksi Keuangan",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurface
+          )
+          if (pendingReviewCount > 0) {
+            Spacer(modifier = Modifier.width(6.dp))
+            Surface(
+              shape = RoundedCornerShape(4.dp),
+              color = PantauWarningAmber
+            ) {
+              Text(
+                text = "$pendingReviewCount tinjau",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = Color.Black,
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+              )
+            }
+          }
+        }
+        Text(
+          text = if (connectionsCount > 0) {
+            "$connectionsCount akun terhubung (${connectedProviders.joinToString(", ")})"
+          } else {
+            "Hubungkan DANA, e-wallet, atau rekening bank Anda"
+          },
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          maxLines = 1,
+          overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+        )
+      }
+      Icon(
+        imageVector = Icons.Default.ArrowForward,
+        contentDescription = "Kelola",
+        tint = PantauPrimaryBlue,
+        modifier = Modifier.size(18.dp)
+      )
+    }
+  }
+}
+

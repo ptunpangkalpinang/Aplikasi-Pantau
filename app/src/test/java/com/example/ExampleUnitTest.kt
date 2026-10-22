@@ -222,4 +222,133 @@ class FinancialEngineTest {
     assertEquals(125_000L, FinancialEngine.parseRupiahInput("Rp 125.000"))
     assertTrue(FinancialEngine.formatRupiah(1_000_000L).contains("1.000.000"))
   }
+
+  @Test
+  fun test11_financialIntegrationCategorizer() {
+    // 1. GoFood should map to Makanan dan Kebutuhan Pokok
+    val goFoodResult = com.example.integration.TransactionCategorizer.categorize(
+      rawDescription = "Pembayaran GoFood Sate Padang Ajo Ramon",
+      merchantName = "GoFood",
+      rawType = "EXPENSE"
+    )
+    assertEquals("Makanan dan Kebutuhan Pokok", goFoodResult.suggestedCategory)
+    assertEquals(TransactionType.EXPENSE, goFoodResult.suggestedType)
+
+    // 2. PLN should map to Tagihan Listrik dan Air
+    val plnResult = com.example.integration.TransactionCategorizer.categorize(
+      rawDescription = "PLN PRABAYAR 50K",
+      merchantName = "PLN",
+      rawType = "DB"
+    )
+    assertEquals("Tagihan Listrik dan Air", plnResult.suggestedCategory)
+
+    // 3. Transfer to DANA should be recognized as internal transfer
+    val transferResult = com.example.integration.TransactionCategorizer.categorize(
+      rawDescription = "TRSF KE DANA TOP UP E-WALLET",
+      merchantName = "DANA",
+      rawType = "DB"
+    )
+    assertTrue(transferResult.isInternalTransfer)
+    assertEquals(TransactionType.TRANSFER_INTERNAL, transferResult.suggestedType)
+
+    // 4. Unknown string should be marked for pending review
+    val unknownResult = com.example.integration.TransactionCategorizer.categorize(
+      rawDescription = "XYZ_MYSTERY_PAYMENT_9921",
+      merchantName = "",
+      rawType = "DB"
+    )
+    assertEquals(com.example.data.model.ReviewStatus.PENDING_REVIEW, unknownResult.reviewStatus)
+  }
+
+  @Test
+  fun test12_duplicateTransactionChecker() {
+    val existing = listOf(
+      TransactionEntity(
+        id = "t1",
+        type = TransactionType.EXPENSE.name,
+        amount = 50_000L,
+        category = "Makanan & Minuman",
+        dateMillis = 1700000000000L,
+        source = "DANA",
+        note = "Kopi Kenangan",
+        sourceTransactionId = "DANA-TX-1001",
+        connectionId = "conn_dana"
+      )
+    )
+
+    // 1. Exact duplicate by sourceTransactionId
+    val res1 = com.example.integration.DuplicateTransactionChecker.check(
+      incomingSourceTxId = "DANA-TX-1001",
+      incomingDateMillis = 1700000000000L,
+      incomingAmount = 50_000L,
+      incomingNote = "Kopi Kenangan",
+      incomingConnectionId = "conn_dana",
+      existingTransactions = existing
+    )
+    assertEquals(com.example.integration.DuplicateCheckResult.EXACT_DUPLICATE, res1)
+
+    // 2. New transaction should be UNIQUE
+    val res2 = com.example.integration.DuplicateTransactionChecker.check(
+      incomingSourceTxId = "DANA-TX-1002",
+      incomingDateMillis = 1700005000000L,
+      incomingAmount = 75_000L,
+      incomingNote = "Makan Siang",
+      incomingConnectionId = "conn_dana",
+      existingTransactions = existing
+    )
+    assertEquals(com.example.integration.DuplicateCheckResult.UNIQUE, res2)
+  }
+
+  @Test
+  fun test13_internalTransferFinancialNeutrality() {
+    // Internal transfer from BCA to DANA (e.g. Top Up 200.000)
+    // Total income: 5.000.000. Internal transfer: 200.000.
+    // Internal transfer should NOT count as consumer expense or reduce total wealth!
+    val txs = listOf(
+      TransactionEntity(
+        id = "t1",
+        type = TransactionType.INCOME.name,
+        amount = 5_000_000L,
+        category = "Gaji Pokok",
+        dateMillis = System.currentTimeMillis(),
+        source = "BCA",
+        note = "Gaji"
+      ),
+      TransactionEntity(
+        id = "t2",
+        type = TransactionType.TRANSFER_INTERNAL.name,
+        amount = 200_000L,
+        category = "Transfer Internal",
+        dateMillis = System.currentTimeMillis(),
+        source = "BCA -> DANA",
+        note = "Top Up DANA",
+        isInternalTransfer = true
+      )
+    )
+
+    val summary = FinancialEngine.calculateSummary(
+      initialBalance = 0L,
+      transactions = txs,
+      goals = emptyList()
+    )
+
+    // Consumer expense should be 0 because it's an internal transfer
+    assertEquals(0L, summary.totalExpense)
+    // Total funds should remain 5.000.000 (neutrality preserved)
+    assertEquals(5_000_000L, summary.totalRecordedFunds)
+  }
+
+  @Test
+  fun test14_csvStatementParser() {
+    val bcaCsv = com.example.integration.CsvStatementParser.getSampleCsv("bca")
+    val parsedBca = com.example.integration.CsvStatementParser.parse(bcaCsv, "bca")
+    assertTrue(parsedBca.isNotEmpty())
+    assertEquals(5, parsedBca.size)
+
+    val danaCsv = com.example.integration.CsvStatementParser.getSampleCsv("dana")
+    val parsedDana = com.example.integration.CsvStatementParser.parse(danaCsv, "dana")
+    assertTrue(parsedDana.isNotEmpty())
+    assertEquals(4, parsedDana.size)
+  }
 }
+

@@ -22,12 +22,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.BarChart
+import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.ReceiptLong
 import androidx.compose.material.icons.filled.Savings
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.AccountBalanceWallet
 import androidx.compose.material.icons.outlined.BarChart
+import androidx.compose.material.icons.outlined.CloudSync
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.ReceiptLong
 import androidx.compose.material.icons.outlined.Savings
@@ -72,6 +74,7 @@ import com.example.ui.components.ConfirmDialog
 import com.example.ui.components.SavingsDepositWithdrawDialog
 import com.example.ui.components.SavingsGoalDialog
 import com.example.ui.screens.BudgetScreen
+import com.example.ui.screens.FinancialConnectionsScreen
 import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.ReportsScreen
 import com.example.ui.screens.SavingsScreen
@@ -94,8 +97,18 @@ enum class PantauScreen(
   SAVINGS("Tabungan", Icons.Filled.Savings, Icons.Outlined.Savings),
   BUDGET("Anggaran", Icons.Filled.AccountBalanceWallet, Icons.Outlined.AccountBalanceWallet),
   REPORTS("Laporan", Icons.Filled.BarChart, Icons.Outlined.BarChart),
-  SETTINGS("Pengaturan", Icons.Filled.Settings, Icons.Outlined.Settings)
+  SETTINGS("Pengaturan", Icons.Filled.Settings, Icons.Outlined.Settings),
+  CONNECTIONS("Koneksi Keuangan", Icons.Filled.CloudSync, Icons.Outlined.CloudSync)
 }
+
+val mainNavScreens = listOf(
+  PantauScreen.HOME,
+  PantauScreen.TRANSACTIONS,
+  PantauScreen.SAVINGS,
+  PantauScreen.BUDGET,
+  PantauScreen.REPORTS,
+  PantauScreen.SETTINGS
+)
 
 class MainActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
@@ -108,7 +121,10 @@ class MainActivity : ComponentActivity() {
       database.savingsGoalDao(),
       database.budgetDao(),
       database.categoryDao(),
-      database.preferenceDao()
+      database.preferenceDao(),
+      database.financialConnectionDao(),
+      database.categoryRuleDao(),
+      database.syncLogDao()
     )
 
     setContent {
@@ -147,9 +163,13 @@ fun PantauMainApp(viewModel: PantauViewModel) {
     }
   }
 
-  // Handle Back press: navigate to HOME before exiting
+  // Handle Back press: navigate to SETTINGS if in CONNECTIONS, else to HOME
   BackHandler(enabled = currentScreen != PantauScreen.HOME) {
-    currentScreen = PantauScreen.HOME
+    if (currentScreen == PantauScreen.CONNECTIONS) {
+      currentScreen = PantauScreen.SETTINGS
+    } else {
+      currentScreen = PantauScreen.HOME
+    }
   }
 
   // Dialog states
@@ -187,7 +207,7 @@ fun PantauMainApp(viewModel: PantauViewModel) {
             contentColor = MaterialTheme.colorScheme.onSurface,
             tonalElevation = 6.dp
           ) {
-            PantauScreen.entries.forEach { screen ->
+            mainNavScreens.forEach { screen ->
               val isSelected = currentScreen == screen
               NavigationBarItem(
                 selected = isSelected,
@@ -235,7 +255,7 @@ fun PantauMainApp(viewModel: PantauViewModel) {
             containerColor = MaterialTheme.colorScheme.surface,
             contentColor = MaterialTheme.colorScheme.onSurface
           ) {
-            PantauScreen.entries.forEach { screen ->
+            mainNavScreens.forEach { screen ->
               val isSelected = currentScreen == screen
               NavigationRailItem(
                 selected = isSelected,
@@ -274,6 +294,7 @@ fun PantauMainApp(viewModel: PantauViewModel) {
               onNavigateToTransactions = { currentScreen = PantauScreen.TRANSACTIONS },
               onNavigateToSavings = { currentScreen = PantauScreen.SAVINGS },
               onNavigateToBudgets = { currentScreen = PantauScreen.BUDGET },
+              onNavigateToConnections = { currentScreen = PantauScreen.CONNECTIONS },
               onDepositGoal = { goal -> depositGoalTarget = goal },
               onWithdrawGoal = { goal -> withdrawGoalTarget = goal },
               onEditGoal = { goal ->
@@ -372,6 +393,7 @@ fun PantauMainApp(viewModel: PantauViewModel) {
               onApplyDemoData = { viewModel.applyDemoData() },
               onClearDemoData = { viewModel.clearDemoData() },
               onResetAllData = { viewModel.resetAllData() },
+              onNavigateToConnections = { currentScreen = PantauScreen.CONNECTIONS },
               onExportJson = {
                 coroutineScope.launch {
                   val json = viewModel.exportJson()
@@ -381,6 +403,36 @@ fun PantauMainApp(viewModel: PantauViewModel) {
                 }
               },
               onImportJson = { jsonStr -> viewModel.importJson(jsonStr) }
+            )
+
+            PantauScreen.CONNECTIONS -> FinancialConnectionsScreen(
+              uiState = uiState,
+              onNavigateBack = { currentScreen = PantauScreen.HOME },
+              onConnectAccount = { providerId, alias, maskedAccount, method ->
+                viewModel.connectAccount(providerId, alias, maskedAccount, method)
+              },
+              onDisconnectAccount = { connection ->
+                viewModel.disconnectAccount(connection)
+              },
+              onSyncAccount = { connection ->
+                viewModel.syncAccount(connection)
+              },
+              onSyncAllAccounts = {
+                viewModel.syncAllAccounts()
+              },
+              onImportCsv = { csvContent, providerId, connectionId ->
+                viewModel.importCsvStatement(csvContent, providerId, connectionId)
+              },
+              onConfirmPendingTx = { txId, correctedCategory, correctedType, isInternalTransfer, linkedGoalId, saveAsRuleKeyword ->
+                viewModel.confirmPendingTransaction(
+                  transactionId = txId,
+                  correctedCategory = correctedCategory,
+                  correctedType = correctedType,
+                  isInternalTransfer = isInternalTransfer,
+                  linkedSavingsGoalId = linkedGoalId,
+                  saveAsRuleKeyword = saveAsRuleKeyword
+                )
+              }
             )
           }
         }

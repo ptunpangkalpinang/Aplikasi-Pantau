@@ -2,18 +2,26 @@ package com.example.data.repository
 
 import com.example.data.local.BudgetDao
 import com.example.data.local.CategoryDao
+import com.example.data.local.CategoryRuleDao
 import com.example.data.local.DefaultData
+import com.example.data.local.FinancialConnectionDao
 import com.example.data.local.PreferenceDao
 import com.example.data.local.SavingsGoalDao
+import com.example.data.local.SyncLogDao
 import com.example.data.local.TransactionDao
 import com.example.data.model.BudgetEntity
 import com.example.data.model.CategoryEntity
+import com.example.data.model.CategoryRuleEntity
+import com.example.data.model.FinancialConnectionEntity
 import com.example.data.model.PreferenceEntity
+import com.example.data.model.ReviewStatus
 import com.example.data.model.SavingsGoalEntity
+import com.example.data.model.SyncLogEntity
 import com.example.data.model.TransactionEntity
 import com.example.data.model.TransactionType
 import com.example.domain.FinancialEngine
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -23,16 +31,27 @@ class PantauRepository(
   private val savingsGoalDao: SavingsGoalDao,
   private val budgetDao: BudgetDao,
   private val categoryDao: CategoryDao,
-  private val preferenceDao: PreferenceDao
+  private val preferenceDao: PreferenceDao,
+  private val financialConnectionDao: FinancialConnectionDao,
+  private val categoryRuleDao: CategoryRuleDao,
+  private val syncLogDao: SyncLogDao
 ) {
   val allTransactions: Flow<List<TransactionEntity>> = transactionDao.getAllTransactions()
   val allGoals: Flow<List<SavingsGoalEntity>> = savingsGoalDao.getAllGoals()
   val allBudgets: Flow<List<BudgetEntity>> = budgetDao.getAllBudgets()
   val allCategories: Flow<List<CategoryEntity>> = categoryDao.getAllCategories()
   val allPreferences: Flow<List<PreferenceEntity>> = preferenceDao.getAllPreferences()
+  val allConnections: Flow<List<FinancialConnectionEntity>> = financialConnectionDao.getAllConnections()
+  val allCategoryRules: Flow<List<CategoryRuleEntity>> = categoryRuleDao.getAllRules()
+  val recentSyncLogs: Flow<List<SyncLogEntity>> = syncLogDao.getRecentLogs()
+  val pendingReviewTransactions: Flow<List<TransactionEntity>> = transactionDao.getTransactionsByReviewStatus("PENDING_REVIEW")
 
   suspend fun insertTransaction(transaction: TransactionEntity) {
     transactionDao.insert(transaction)
+  }
+
+  suspend fun insertTransactions(transactions: List<TransactionEntity>) {
+    transactionDao.insertAll(transactions)
   }
 
   suspend fun updateTransaction(transaction: TransactionEntity) {
@@ -55,6 +74,10 @@ class PantauRepository(
       }
     }
     transactionDao.delete(transaction)
+  }
+
+  suspend fun getAllTransactionsSnapshot(): List<TransactionEntity> {
+    return allTransactions.first()
   }
 
   suspend fun depositToSavingsGoal(
@@ -82,7 +105,8 @@ class PantauRepository(
       dateMillis = dateMillis,
       source = source,
       note = if (note.isBlank()) "Setoran ke ${goal.name}" else note,
-      savingsGoalId = goal.id
+      savingsGoalId = goal.id,
+      reviewStatus = ReviewStatus.CONFIRMED.name
     )
     transactionDao.insert(tx)
   }
@@ -112,9 +136,59 @@ class PantauRepository(
       dateMillis = dateMillis,
       source = source,
       note = if (note.isBlank()) "Penarikan dari ${goal.name}" else note,
-      savingsGoalId = goal.id
+      savingsGoalId = goal.id,
+      reviewStatus = ReviewStatus.CONFIRMED.name
     )
     transactionDao.insert(tx)
+  }
+
+  suspend fun confirmPendingTransaction(
+    transactionId: String,
+    correctedCategory: String,
+    correctedType: TransactionType,
+    isInternalTransfer: Boolean,
+    linkedSavingsGoalId: String? = null,
+    saveAsRuleKeyword: String? = null
+  ) {
+    val existing = transactionDao.getTransactionById(transactionId) ?: return
+    var finalType = correctedType.name
+
+    if (linkedSavingsGoalId != null) {
+      finalType = TransactionType.SAVINGS_DEPOSIT.name
+      val goal = savingsGoalDao.getGoalById(linkedSavingsGoalId)
+      if (goal != null) {
+        val updatedAmount = goal.currentAmount + existing.amount
+        savingsGoalDao.update(
+          goal.copy(
+            currentAmount = updatedAmount,
+            isCompleted = updatedAmount >= goal.targetAmount && goal.targetAmount > 0,
+            updatedAt = System.currentTimeMillis()
+          )
+        )
+      }
+    }
+
+    val updatedTx = existing.copy(
+      type = finalType,
+      category = correctedCategory,
+      isInternalTransfer = isInternalTransfer,
+      savingsGoalId = linkedSavingsGoalId,
+      reviewStatus = ReviewStatus.CONFIRMED.name,
+      updatedAt = System.currentTimeMillis()
+    )
+    transactionDao.update(updatedTx)
+
+    // Save custom rule if requested
+    if (!saveAsRuleKeyword.isNullOrBlank()) {
+      categoryRuleDao.insert(
+        CategoryRuleEntity(
+          id = UUID.randomUUID().toString(),
+          keyword = saveAsRuleKeyword.trim(),
+          targetCategory = correctedCategory,
+          transactionType = correctedType.name
+        )
+      )
+    }
   }
 
   suspend fun insertGoal(goal: SavingsGoalEntity) {
@@ -153,12 +227,37 @@ class PantauRepository(
     preferenceDao.setPreference(PreferenceEntity(key, value))
   }
 
+  // Financial Connection Management
+  suspend fun insertConnection(connection: FinancialConnectionEntity) {
+    financialConnectionDao.insert(connection)
+  }
+
+  suspend fun updateConnection(connection: FinancialConnectionEntity) {
+    financialConnectionDao.update(connection)
+  }
+
+  suspend fun deleteConnection(connection: FinancialConnectionEntity) {
+    financialConnectionDao.delete(connection)
+  }
+
+  suspend fun insertCategoryRule(rule: CategoryRuleEntity) {
+    categoryRuleDao.insert(rule)
+  }
+
+  suspend fun deleteCategoryRule(rule: CategoryRuleEntity) {
+    categoryRuleDao.delete(rule)
+  }
+
+  suspend fun insertSyncLog(log: SyncLogEntity) {
+    syncLogDao.insert(log)
+  }
+
   suspend fun applyDemoData() {
     val demo = DefaultData.generateDemoData()
     setPreference("initial_balance", demo.initialBalance.toString())
     savingsGoalDao.insertAll(demo.goals)
     transactionDao.insertAll(demo.transactions)
-    
+
     // Add default budgets for demo
     val demoBudgets = listOf(
       BudgetEntity(
@@ -181,13 +280,46 @@ class PantauRepository(
       )
     )
     budgetDao.insertAll(demoBudgets)
+
+    // Add demo connected accounts (DANA & BCA)
+    val now = System.currentTimeMillis()
+    val demoConnections = listOf(
+      FinancialConnectionEntity(
+        id = "demo_conn_dana",
+        providerId = "dana",
+        providerName = "DANA",
+        accountType = "E_WALLET",
+        accountAlias = "DANA Pribadi",
+        maskedAccountNumber = "0812-••••-8890",
+        status = "SYNC_SUCCESS",
+        integrationMethod = "OPEN_FINANCE_SANDBOX",
+        lastSyncMillis = now - 2 * 3600_000L,
+        lastSyncStatus = "Sinkronisasi berhasil (3 transaksi diimpor)",
+        importedTransactionsCount = 3
+      ),
+      FinancialConnectionEntity(
+        id = "demo_conn_bca",
+        providerId = "bca",
+        providerName = "Bank BCA",
+        accountType = "BANK_ACCOUNT",
+        accountAlias = "BCA Tabungan Utama",
+        maskedAccountNumber = "BCA •••• 4821",
+        status = "SYNC_SUCCESS",
+        integrationMethod = "OPEN_FINANCE_SANDBOX",
+        lastSyncMillis = now - 5 * 3600_000L,
+        lastSyncStatus = "Sinkronisasi berhasil (3 transaksi diimpor)",
+        importedTransactionsCount = 3
+      )
+    )
+    financialConnectionDao.insertAll(demoConnections)
   }
 
   suspend fun clearDemoData() {
-    // Clear demo transactions & goals
     transactionDao.deleteAll()
     savingsGoalDao.deleteAll()
     budgetDao.deleteAll()
+    financialConnectionDao.deleteAll()
+    syncLogDao.deleteAll()
     setPreference("initial_balance", "0")
   }
 
@@ -197,6 +329,9 @@ class PantauRepository(
     budgetDao.deleteAll()
     categoryDao.deleteAll()
     preferenceDao.deleteAll()
+    financialConnectionDao.deleteAll()
+    categoryRuleDao.deleteAll()
+    syncLogDao.deleteAll()
 
     // Restore defaults
     categoryDao.insertAll(DefaultData.getInitialCategories())
@@ -213,10 +348,11 @@ class PantauRepository(
     goals: List<SavingsGoalEntity>,
     budgets: List<BudgetEntity>,
     categories: List<CategoryEntity>,
-    preferences: List<PreferenceEntity>
+    preferences: List<PreferenceEntity>,
+    connections: List<FinancialConnectionEntity> = emptyList()
   ): String {
     val root = JSONObject()
-    root.put("version", 1)
+    root.put("version", 2)
     root.put("exportedAt", System.currentTimeMillis())
 
     val txArray = JSONArray()
@@ -231,6 +367,10 @@ class PantauRepository(
       obj.put("note", tx.note)
       obj.put("isRecurringSalary", tx.isRecurringSalary)
       obj.put("savingsGoalId", tx.savingsGoalId ?: "")
+      obj.put("sourceTransactionId", tx.sourceTransactionId ?: "")
+      obj.put("connectionId", tx.connectionId ?: "")
+      obj.put("isInternalTransfer", tx.isInternalTransfer)
+      obj.put("reviewStatus", tx.reviewStatus)
       obj.put("createdAt", tx.createdAt)
       txArray.put(obj)
     }
@@ -275,6 +415,23 @@ class PantauRepository(
     }
     root.put("preferences", prefArray)
 
+    val connArray = JSONArray()
+    for (c in connections) {
+      val obj = JSONObject()
+      obj.put("id", c.id)
+      obj.put("providerId", c.providerId)
+      obj.put("providerName", c.providerName)
+      obj.put("accountType", c.accountType)
+      obj.put("accountAlias", c.accountAlias)
+      obj.put("maskedAccountNumber", c.maskedAccountNumber)
+      obj.put("status", c.status)
+      obj.put("integrationMethod", c.integrationMethod)
+      obj.put("lastSyncMillis", c.lastSyncMillis)
+      obj.put("importedTransactionsCount", c.importedTransactionsCount)
+      connArray.put(obj)
+    }
+    root.put("connections", connArray)
+
     return root.toString(2)
   }
 
@@ -289,6 +446,7 @@ class PantauRepository(
         transactionDao.deleteAll()
         savingsGoalDao.deleteAll()
         budgetDao.deleteAll()
+        financialConnectionDao.deleteAll()
       }
 
       if (root.has("goals")) {
@@ -322,6 +480,8 @@ class PantauRepository(
         for (i in 0 until txArray.length()) {
           val obj = txArray.getJSONObject(i)
           val gId = obj.optString("savingsGoalId", "")
+          val srcTxId = obj.optString("sourceTransactionId", "")
+          val connId = obj.optString("connectionId", "")
           transactions.add(
             TransactionEntity(
               id = obj.optString("id", UUID.randomUUID().toString()),
@@ -332,7 +492,11 @@ class PantauRepository(
               source = obj.optString("source", "Umum"),
               note = obj.optString("note", ""),
               isRecurringSalary = obj.optBoolean("isRecurringSalary", false),
-              savingsGoalId = if (gId.isBlank()) null else gId
+              savingsGoalId = if (gId.isBlank()) null else gId,
+              sourceTransactionId = if (srcTxId.isBlank()) null else srcTxId,
+              connectionId = if (connId.isBlank()) null else connId,
+              isInternalTransfer = obj.optBoolean("isInternalTransfer", false),
+              reviewStatus = obj.optString("reviewStatus", ReviewStatus.CONFIRMED.name)
             )
           )
         }
@@ -356,6 +520,29 @@ class PantauRepository(
         budgetDao.insertAll(budgets)
       }
 
+      if (root.has("connections")) {
+        val cArray = root.getJSONArray("connections")
+        val connections = mutableListOf<FinancialConnectionEntity>()
+        for (i in 0 until cArray.length()) {
+          val obj = cArray.getJSONObject(i)
+          connections.add(
+            FinancialConnectionEntity(
+              id = obj.optString("id", UUID.randomUUID().toString()),
+              providerId = obj.getString("providerId"),
+              providerName = obj.getString("providerName"),
+              accountType = obj.optString("accountType", "E_WALLET"),
+              accountAlias = obj.optString("accountAlias", ""),
+              maskedAccountNumber = obj.optString("maskedAccountNumber", ""),
+              status = obj.optString("status", "CONNECTED"),
+              integrationMethod = obj.optString("integrationMethod", "OPEN_FINANCE_SANDBOX"),
+              lastSyncMillis = obj.optLong("lastSyncMillis", 0L),
+              importedTransactionsCount = obj.optInt("importedTransactionsCount", 0)
+            )
+          )
+        }
+        financialConnectionDao.insertAll(connections)
+      }
+
       if (root.has("preferences")) {
         val pArray = root.getJSONArray("preferences")
         for (i in 0 until pArray.length()) {
@@ -373,12 +560,12 @@ class PantauRepository(
 
   fun exportToCsv(transactions: List<TransactionEntity>): String {
     val sb = StringBuilder()
-    sb.append("ID,Tipe,Nominal,Kategori,Tanggal,Sumber_Metode,Catatan,Gaji_Rutin,Tujuan_Tabungan\n")
+    sb.append("ID,Tipe,Nominal,Kategori,Tanggal,Sumber_Metode,Catatan,Gaji_Rutin,Tujuan_Tabungan,Koneksi_ID,Status_Review\n")
     for (tx in transactions) {
       val dateStr = FinancialEngine.formatDate(tx.dateMillis, "yyyy-MM-dd HH:mm:ss")
       val cleanNote = tx.note.replace(",", " ").replace("\n", " ")
       val cleanSource = tx.source.replace(",", " ")
-      sb.append("${tx.id},${tx.type},${tx.amount},\"${tx.category}\",\"$dateStr\",\"$cleanSource\",\"$cleanNote\",${tx.isRecurringSalary},\"${tx.savingsGoalId ?: ""}\"\n")
+      sb.append("${tx.id},${tx.type},${tx.amount},\"${tx.category}\",\"$dateStr\",\"$cleanSource\",\"$cleanNote\",${tx.isRecurringSalary},\"${tx.savingsGoalId ?: ""}\",\"${tx.connectionId ?: ""}\",\"${tx.reviewStatus}\"\n")
     }
     return sb.toString()
   }

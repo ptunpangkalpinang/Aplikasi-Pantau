@@ -8,8 +8,11 @@ import androidx.room.Query
 import androidx.room.Update
 import com.example.data.model.BudgetEntity
 import com.example.data.model.CategoryEntity
+import com.example.data.model.CategoryRuleEntity
+import com.example.data.model.FinancialConnectionEntity
 import com.example.data.model.PreferenceEntity
 import com.example.data.model.SavingsGoalEntity
+import com.example.data.model.SyncLogEntity
 import com.example.data.model.TransactionEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -21,8 +24,17 @@ interface TransactionDao {
   @Query("SELECT * FROM transactions WHERE id = :id LIMIT 1")
   suspend fun getTransactionById(id: String): TransactionEntity?
 
+  @Query("SELECT * FROM transactions WHERE sourceTransactionId = :sourceTxId LIMIT 1")
+  suspend fun getTransactionBySourceId(sourceTxId: String): TransactionEntity?
+
+  @Query("SELECT * FROM transactions WHERE reviewStatus = :status ORDER BY dateMillis DESC")
+  fun getTransactionsByReviewStatus(status: String): Flow<List<TransactionEntity>>
+
   @Query("SELECT * FROM transactions WHERE type = :type ORDER BY dateMillis DESC")
   fun getTransactionsByType(type: String): Flow<List<TransactionEntity>>
+
+  @Query("SELECT * FROM transactions WHERE connectionId = :connectionId ORDER BY dateMillis DESC")
+  fun getTransactionsByConnectionId(connectionId: String): Flow<List<TransactionEntity>>
 
   @Insert(onConflict = OnConflictStrategy.REPLACE)
   suspend fun insert(transaction: TransactionEntity)
@@ -133,5 +145,71 @@ interface PreferenceDao {
   suspend fun deletePreference(key: String)
 
   @Query("DELETE FROM app_preferences")
+  suspend fun deleteAll()
+}
+
+@Dao
+interface FinancialConnectionDao {
+  @Query("SELECT * FROM financial_connections ORDER BY createdAt ASC")
+  fun getAllConnections(): Flow<List<FinancialConnectionEntity>>
+
+  @Query("SELECT * FROM financial_connections WHERE id = :id LIMIT 1")
+  suspend fun getConnectionById(id: String): FinancialConnectionEntity?
+
+  @Query("SELECT * FROM financial_connections WHERE providerId = :providerId LIMIT 1")
+  suspend fun getConnectionByProviderId(providerId: String): FinancialConnectionEntity?
+
+  @Insert(onConflict = OnConflictStrategy.REPLACE)
+  suspend fun insert(connection: FinancialConnectionEntity)
+
+  @Insert(onConflict = OnConflictStrategy.REPLACE)
+  suspend fun insertAll(connections: List<FinancialConnectionEntity>)
+
+  @Update
+  suspend fun update(connection: FinancialConnectionEntity)
+
+  @Delete
+  suspend fun delete(connection: FinancialConnectionEntity)
+
+  @Query("DELETE FROM financial_connections WHERE id = :id")
+  suspend fun deleteById(id: String)
+
+  @Query("DELETE FROM financial_connections")
+  suspend fun deleteAll()
+}
+
+@Dao
+interface CategoryRuleDao {
+  @Query("SELECT * FROM category_rules ORDER BY createdAt DESC")
+  fun getAllRules(): Flow<List<CategoryRuleEntity>>
+
+  @Query("SELECT * FROM category_rules")
+  suspend fun getAllRulesList(): List<CategoryRuleEntity>
+
+  @Insert(onConflict = OnConflictStrategy.REPLACE)
+  suspend fun insert(rule: CategoryRuleEntity)
+
+  @Insert(onConflict = OnConflictStrategy.REPLACE)
+  suspend fun insertAll(rules: List<CategoryRuleEntity>)
+
+  @Delete
+  suspend fun delete(rule: CategoryRuleEntity)
+
+  @Query("DELETE FROM category_rules WHERE id = :id")
+  suspend fun deleteById(id: String)
+
+  @Query("DELETE FROM category_rules")
+  suspend fun deleteAll()
+}
+
+@Dao
+interface SyncLogDao {
+  @Query("SELECT * FROM sync_logs ORDER BY timestampMillis DESC LIMIT 50")
+  fun getRecentLogs(): Flow<List<SyncLogEntity>>
+
+  @Insert(onConflict = OnConflictStrategy.REPLACE)
+  suspend fun insert(log: SyncLogEntity)
+
+  @Query("DELETE FROM sync_logs")
   suspend fun deleteAll()
 }

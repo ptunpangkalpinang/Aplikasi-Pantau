@@ -88,6 +88,9 @@ object FinancialEngine {
     var totalWithdrawal = 0L
 
     for (tx in transactions) {
+      if (tx.reviewStatus == "PENDING_REVIEW" || tx.isInternalTransfer || tx.type == TransactionType.TRANSFER_INTERNAL.name) {
+        continue
+      }
       when (tx.type) {
         TransactionType.INCOME.name -> totalIncome += tx.amount
         TransactionType.EXPENSE.name -> totalExpense += tx.amount
@@ -189,6 +192,7 @@ object FinancialEngine {
 
     val matchingExpenses = expenses.filter { tx ->
       if (tx.type != TransactionType.EXPENSE.name) return@filter false
+      if (tx.reviewStatus == "PENDING_REVIEW" || tx.isInternalTransfer) return@filter false
       
       // Match month if specified, or default to current month
       val txCal = Calendar.getInstance()

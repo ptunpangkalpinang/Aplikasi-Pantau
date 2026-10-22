@@ -4,11 +4,15 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.data.model.BudgetEntity
 import com.example.data.model.CategoryEntity
+import com.example.data.model.CategoryRuleEntity
+import com.example.data.model.FinancialConnectionEntity
 import com.example.data.model.PreferenceEntity
 import com.example.data.model.SavingsGoalEntity
+import com.example.data.model.SyncLogEntity
 import com.example.data.model.TransactionEntity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -20,9 +24,12 @@ import kotlinx.coroutines.launch
     SavingsGoalEntity::class,
     BudgetEntity::class,
     CategoryEntity::class,
-    PreferenceEntity::class
+    PreferenceEntity::class,
+    FinancialConnectionEntity::class,
+    CategoryRuleEntity::class,
+    SyncLogEntity::class
   ],
-  version = 1,
+  version = 2,
   exportSchema = false
 )
 abstract class PantauDatabase : RoomDatabase() {
@@ -31,10 +38,63 @@ abstract class PantauDatabase : RoomDatabase() {
   abstract fun budgetDao(): BudgetDao
   abstract fun categoryDao(): CategoryDao
   abstract fun preferenceDao(): PreferenceDao
+  abstract fun financialConnectionDao(): FinancialConnectionDao
+  abstract fun categoryRuleDao(): CategoryRuleDao
+  abstract fun syncLogDao(): SyncLogDao
 
   companion object {
     @Volatile
     private var INSTANCE: PantauDatabase? = null
+
+    val MIGRATION_1_2 = object : Migration(1, 2) {
+      override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE transactions ADD COLUMN sourceTransactionId TEXT DEFAULT NULL")
+        db.execSQL("ALTER TABLE transactions ADD COLUMN connectionId TEXT DEFAULT NULL")
+        db.execSQL("ALTER TABLE transactions ADD COLUMN isInternalTransfer INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("ALTER TABLE transactions ADD COLUMN targetAccountId TEXT DEFAULT NULL")
+        db.execSQL("ALTER TABLE transactions ADD COLUMN reviewStatus TEXT NOT NULL DEFAULT 'CONFIRMED'")
+
+        db.execSQL("""
+          CREATE TABLE IF NOT EXISTS financial_connections (
+            id TEXT PRIMARY KEY NOT NULL,
+            providerId TEXT NOT NULL,
+            providerName TEXT NOT NULL,
+            accountType TEXT NOT NULL,
+            accountAlias TEXT NOT NULL,
+            maskedAccountNumber TEXT NOT NULL,
+            status TEXT NOT NULL,
+            integrationMethod TEXT NOT NULL,
+            lastSyncMillis INTEGER NOT NULL,
+            lastSyncStatus TEXT NOT NULL,
+            importedTransactionsCount INTEGER NOT NULL,
+            createdAt INTEGER NOT NULL,
+            updatedAt INTEGER NOT NULL
+          )
+        """.trimIndent())
+
+        db.execSQL("""
+          CREATE TABLE IF NOT EXISTS category_rules (
+            id TEXT PRIMARY KEY NOT NULL,
+            keyword TEXT NOT NULL,
+            targetCategory TEXT NOT NULL,
+            transactionType TEXT NOT NULL,
+            createdAt INTEGER NOT NULL
+          )
+        """.trimIndent())
+
+        db.execSQL("""
+          CREATE TABLE IF NOT EXISTS sync_logs (
+            id TEXT PRIMARY KEY NOT NULL,
+            connectionId TEXT NOT NULL,
+            providerName TEXT NOT NULL,
+            timestampMillis INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            itemsCount INTEGER NOT NULL,
+            notes TEXT NOT NULL
+          )
+        """.trimIndent())
+      }
+    }
 
     fun getDatabase(context: Context, scope: CoroutineScope): PantauDatabase {
       return INSTANCE ?: synchronized(this) {
@@ -43,6 +103,7 @@ abstract class PantauDatabase : RoomDatabase() {
           PantauDatabase::class.java,
           "pantau_database.db"
         )
+        .addMigrations(MIGRATION_1_2)
         .addCallback(object : Callback() {
           override fun onCreate(db: SupportSQLiteDatabase) {
             super.onCreate(db)
