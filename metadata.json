@@ -1,0 +1,6 @@
+{
+  "name": "PANTAU",
+  "description": "Aplikasi pencatat dan pemantau keuangan pribadi dengan perhitungan otomatis, target tabungan, dan anggaran.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
